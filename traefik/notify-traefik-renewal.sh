@@ -1,146 +1,148 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-###############################################################################
-# notify-traefik-renewal.sh
-#
-# Sends a Pushover notification whenever Traefik's acme.json changes.
-# Intended to run once per day from cron.
-###############################################################################
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+VERSION="2.0.0"
 
 ENV_FILE="/opt/docker/traefik/.pushover.env"
 ACME_FILE="/opt/docker/traefik/letsencrypt/acme.json"
-STATE_FILE="/opt/docker/traefik/.last_acme_hash"
+STATE_FILE="/opt/docker/traefik/.last_acme_state"
 
 LOGGER="/usr/bin/logger"
 JQ="/usr/bin/jq"
 CURL="/usr/bin/curl"
 SHA256SUM="/usr/bin/sha256sum"
 DATE="/usr/bin/date"
+MKTEMP="/usr/bin/mktemp"
+INSTALL="/usr/bin/install"
 
 LOG_TAG="traefik-renewal"
 
-# ---------------------------------------------------------------------------
-# Logging helpers
-# ---------------------------------------------------------------------------
+usage() {
+cat <<EOF
+notify-traefik-renewal.sh v$VERSION
 
-log_info() {
-    "$LOGGER" -t "$LOG_TAG" "$1"
+Detects added, renewed and removed Traefik certificates by comparing
+certificate fingerprints stored from acme.json.
+
+Usage:
+  notify-traefik-renewal.sh [--help]
+EOF
 }
 
-log_error() {
-    "$LOGGER" -t "$LOG_TAG" -p user.err "$1"
-}
+[[ "${1:-}" == "--help" ]] && { usage; exit 0; }
 
-# ---------------------------------------------------------------------------
-# Sanity checks
-# ---------------------------------------------------------------------------
+log_info(){ "$LOGGER" -t "$LOG_TAG" "$1"; }
+log_error(){ "$LOGGER" -t "$LOG_TAG" -p user.err "$1"; }
 
-if [[ ! -r "$ENV_FILE" ]]; then
-    log_error "Missing or unreadable environment file: $ENV_FILE"
-    exit 1
-fi
+tmp_current=$("$MKTEMP")
+tmp_added=$("$MKTEMP")
+tmp_removed=$("$MKTEMP")
+tmp_changed=$("$MKTEMP")
 
+cleanup(){ rm -f "$tmp_current" "$tmp_added" "$tmp_removed" "$tmp_changed"; }
+trap cleanup EXIT
+
+[[ -r "$ENV_FILE" ]] || { log_error "Missing env file: $ENV_FILE"; exit 1; }
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
-if [[ -z "${PUSHOVER_TOKEN:-}" || -z "${PUSHOVER_USER:-}" ]]; then
-    log_error "Pushover credentials are missing from $ENV_FILE"
+[[ -n "${PUSHOVER_TOKEN:-}" && -n "${PUSHOVER_USER:-}" ]] || {
+  log_error "Pushover credentials missing."; exit 1; }
+
+[[ -f "$ACME_FILE" ]] || { log_error "Missing ACME file."; exit 1; }
+
+generate_state() {
+"$JQ" -r '
+..
+| objects
+| select(.domain != null and .certificate != null)
+| [.domain.main,.certificate]
+| @tsv
+' "$ACME_FILE" |
+while IFS=$'\t' read -r domain cert; do
+    read -r hash _ < <(printf "%s" "$cert" | "$SHA256SUM")
+    printf "%s\t%s\n" "$domain" "$hash"
+done | sort
+}
+
+if ! generate_state >"$tmp_current"; then
+    log_error "Unable to parse $ACME_FILE"
     exit 1
 fi
 
-if [[ ! -f "$ACME_FILE" ]]; then
-    log_error "ACME file not found: $ACME_FILE"
-    exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# Calculate current hash
-# ---------------------------------------------------------------------------
-
-CURRENT_HASH=$("$SHA256SUM" "$ACME_FILE" | awk '{print $1}')
-
-# First run: create baseline and exit quietly.
 if [[ ! -f "$STATE_FILE" ]]; then
-    printf "%s\n" "$CURRENT_HASH" > "$STATE_FILE"
-    chmod 600 "$STATE_FILE"
-    log_info "Initial state created."
+    "$INSTALL" -m600 "$tmp_current" "$STATE_FILE"
+    log_info "Created initial certificate fingerprint database."
     exit 0
 fi
 
-LAST_HASH=$(<"$STATE_FILE")
+declare -A OLD NEW
 
-# Nothing changed.
-if [[ "$CURRENT_HASH" == "$LAST_HASH" ]]; then
+while IFS=$'\t' read -r d h; do OLD["$d"]="$h"; done <"$STATE_FILE"
+while IFS=$'\t' read -r d h; do NEW["$d"]="$h"; done <"$tmp_current"
+
+for d in "${!NEW[@]}"; do
+    if [[ ! -v OLD["$d"] ]]; then
+        echo "$d" >>"$tmp_added"
+    elif [[ "${OLD[$d]}" != "${NEW[$d]}" ]]; then
+        echo "$d" >>"$tmp_changed"
+    fi
+done
+
+for d in "${!OLD[@]}"; do
+    [[ -v NEW["$d"] ]] || echo "$d" >>"$tmp_removed"
+done
+
+sort -o "$tmp_added" "$tmp_added"
+sort -o "$tmp_changed" "$tmp_changed"
+sort -o "$tmp_removed" "$tmp_removed"
+
+if [[ ! -s "$tmp_added" && ! -s "$tmp_changed" && ! -s "$tmp_removed" ]]; then
+    log_info "No certificate changes detected."
     exit 0
 fi
 
-log_info "Detected change in acme.json."
+ts=$("$DATE" -u --iso-8601=seconds)
 
-# ---------------------------------------------------------------------------
-# Extract domains
-# ---------------------------------------------------------------------------
-
-if ! DOMAINS=$(
-    "$JQ" -r '
-        .. | objects
-        | select(.domain != null)
-        | .domain.main
-    ' "$ACME_FILE" 2>/dev/null | sort -u
-); then
-    DOMAINS="(unable to parse acme.json)"
-    log_error "Failed to parse domain list from $ACME_FILE"
-fi
-
-[[ -z "$DOMAINS" ]] && DOMAINS="(no domains found)"
-
-TIMESTAMP=$("$DATE" -u --iso-8601=seconds)
-
-MESSAGE=$(cat <<EOF
-🔐 Traefik updated one or more Let's Encrypt certificates.
+MESSAGE="🔐 Traefik Certificate Update
 
 Time:
-$TIMESTAMP
+$ts"
 
-Domains:
-$(echo "$DOMAINS" | sed 's/^/ • /')
-EOF
-)
+append_section() {
+    local title="$1" icon="$2" file="$3"
+    [[ -s "$file" ]] || return
+    MESSAGE+="
 
-# ---------------------------------------------------------------------------
-# Send Pushover notification
-# ---------------------------------------------------------------------------
+$title"
+    while IFS= read -r line; do
+        MESSAGE+="
+$icon  $line"
+    done <"$file"
+}
 
-if ! RESPONSE=$(
-    "$CURL" -fsS \
-        -F "token=$PUSHOVER_TOKEN" \
-        -F "user=$PUSHOVER_USER" \
-        -F "title=Traefik Certificate Update" \
-        -F "message=$MESSAGE" \
-        https://api.pushover.net/1/messages.json
-); then
-    log_error "curl failed while contacting Pushover."
+append_section "✨ Freshly renewed:" "🛡️" "$tmp_changed"
+append_section "🎉 New certificates:" "🌟" "$tmp_added"
+append_section "🧹 Removed certificates:" "🗑️" "$tmp_removed"
+
+log_info "Certificate changes detected; sending notification."
+
+if ! response=$("$CURL" -fsS \
+    -F "token=$PUSHOVER_TOKEN" \
+    -F "user=$PUSHOVER_USER" \
+    -F "title=Traefik Certificate Update" \
+    -F "message=$MESSAGE" \
+    https://api.pushover.net/1/messages.json); then
+    log_error "Failed contacting Pushover."
     exit 1
 fi
 
-STATUS=$(echo "$RESPONSE" | "$JQ" -r '.status // "unknown"' 2>/dev/null || echo "unknown")
+status=$(printf "%s" "$response" | "$JQ" -r '.status // "unknown"' 2>/dev/null || printf unknown)
 
-if [[ "$STATUS" != "1" ]]; then
-    log_error "Unexpected response from Pushover: $RESPONSE"
+if [[ "$status" != "1" ]]; then
+    log_error "Unexpected Pushover response: $response"
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# Update state
-# ---------------------------------------------------------------------------
-
-printf "%s\n" "$CURRENT_HASH" > "$STATE_FILE"
-chmod 600 "$STATE_FILE"
-
-log_info "Pushover notification sent successfully."
-
-exit 0
+"$INSTALL" -m600 "$tmp_current" "$STATE_FILE"
+log_info "Notification sent successfully."
