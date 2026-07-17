@@ -1,10 +1,17 @@
-*.env
+# Secrets
+.pushover.env
 .env
-*.key
-*.pem
-*.crt
-*.p12
-*.pfx
-*.log
+.env.*
+
+# Traefik
 acme.json
 .last_acme_hash
+
+# Certificates
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Misc
+*.log
