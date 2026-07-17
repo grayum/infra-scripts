@@ -14,28 +14,28 @@ This directory contains helper scripts for managing and monitoring a Traefik ins
 
 Monitors Traefik's `acme.json` for certificate changes and sends a Pushover notification whenever certificates are:
 
-- ✨ Renewed
-- 🎉 Added
-- 🧹 Removed
+- Renewed
+- Added
+- Removed
 
 Unlike simply detecting that `acme.json` changed, the script compares per-certificate fingerprints, allowing it to report exactly which certificates changed.
 
 ### Features
 
-- 🔐 Detects certificate renewals
-- 🎉 Detects newly issued certificates
-- 🧹 Detects removed certificates
-- 📋 Reports affected domains
-- 📅 Reports the new certificate expiry date (for added and renewed certificates)
-- 📱 Sends Pushover notifications
-- 📝 Logs to the system journal via `logger`
-- 🛡️ Never stores certificate or private key material outside of `acme.json`
-- 🔍 Stores only SHA-256 fingerprints and certificate metadata
-- ⚡ Uses a lightweight fingerprint database for change detection
-- 🧹 Automatically cleans up temporary files
-- 🚦 Robust error handling
-- ✅ Cron-friendly
-- ✅ ShellCheck-friendly
+- Detects certificate renewals
+- Detects newly issued certificates
+- Detects removed certificates
+- Reports affected domains
+- Reports the new certificate expiry date (for added and renewed certificates)
+- Sends Pushover notifications
+- Logs to the system journal via `logger`
+- Never stores certificate or private key material outside of `acme.json`
+- Stores only SHA-256 fingerprints and certificate metadata
+- Uses a lightweight fingerprint database for change detection
+- Automatically cleans up temporary files
+- Robust error handling
+- Cron-friendly
+- ShellCheck-friendly
 
 ### Notification example
 
@@ -47,14 +47,10 @@ Time:
 
 ✨ Freshly renewed:
 🛡️ nextcloud.example.com
-   📅 Expires: Oct 14 09:18:44 2026 GMT
-
 🛡️ immich.example.com
-   📅 Expires: Oct 14 09:18:44 2026 GMT
 
 🎉 New certificates:
 🌟 paperless.example.com
-   📅 Expires: Oct 14 09:18:44 2026 GMT
 
 🧹 Removed certificates:
 🗑️ old-test.example.com
